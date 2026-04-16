@@ -337,7 +337,7 @@ class MEM_WB:
 
 
 # ─────────────────────────────────────────────────────────────
-#  CONTROL UNIT  (TODO: Step 3)
+#  CONTROL UNIT  (TODO: Step 3) 
 # ─────────────────────────────────────────────────────────────
 
 # TODO: Define a ControlSignals dataclass and decode_control(instr) function.
@@ -345,7 +345,21 @@ class MEM_WB:
 #   reg_dst, alu_src, mem_to_reg, reg_write,
 #   mem_read, mem_write, branch, jump, alu_op
 
+# UNFINISHED
+
+class ControlSignals:
+    reg_dst: bool = False
+    alu_src: bool = False
+    mem_to_reg: bool = False
+    reg_write: bool = False
+    mem_read: bool = False
+    mem_write: bool = False
+    branch: bool = False
+    jump: bool = False
+    alu_op: str = "NOP"
+
 def decode_control(instr: Instruction):
+
 
 # ─────────────────────────────────────────────────────────────
 #  ALU  (TODO: Step 4)
