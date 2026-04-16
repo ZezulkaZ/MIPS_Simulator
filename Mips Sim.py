@@ -293,72 +293,191 @@ def assemble(lines: List[str]) -> List['Instruction']:
 
 
 # ─────────────────────────────────────────────────────────────
-#  PIPELINE STATE REGISTERS  (TODO: Step 2)
+#  PIPELINE STATE REGISTERS  (Step 2 ✅)
 # ─────────────────────────────────────────────────────────────
 
-# TODO: Define IF_ID, ID_EX, EX_MEM, MEM_WB dataclasses here.
-# Each should hold:
-#   - the Instruction passing through it
-#   - a `valid: bool` flag (False = bubble/NOP)
-#   - any values computed in the previous stage
-#   - control signals relevant to downstream stages
-#
-# For example, IF_ID might hold the fetched instruction and its PC,
-# while ID_EX might hold the decoded instruction, register values, and control signals.
-# This allows multiple instructions to be processed at the same time, each at a different stage.
-
+# ── CHANGED: IF_ID ───────────────────────────────────────────
+# Your version used `instr` and `pc`.
+# Renamed to match the field names the later stages expect:
+#   instr -> instruction   (clearer, matches ID_EX/EX_MEM/MEM_WB)
+#   pc    -> pc_plus4      (more precise: this is PC+1 in word units,
+#                           i.e. the address of the NEXT instruction,
+#                           used by BEQ to compute the branch target)
 @dataclass
 class IF_ID:
-    instr: Instruction = NOP_INSTR
-    pc: int = 0
-    valid: bool = False
+    instruction: Instruction = field(default_factory=lambda: NOP_INSTR)
+    pc_plus4:    int  = 0     # word index of the instruction that follows this one
+    valid:       bool = False  # False → bubble, downstream stages ignore this slot
 
+# ── CHANGED: ID_EX ───────────────────────────────────────────
+# Your version had rs_val, rt_val, imm but was missing all control signals.
+# Control signals must travel with the instruction through the pipeline
+# so each downstream stage knows what to do without re-decoding.
+# Added: reg_dst, alu_src, mem_to_reg, reg_write, mem_read,
+#        mem_write, branch, jump, alu_op
+# Renamed: rs_val -> reg_rs, rt_val -> reg_rt, imm -> imm_ext
+#   (imm_ext makes it clear the value has been sign-extended to 32 bits)
 @dataclass
 class ID_EX:
-    instr: Instruction = NOP_INSTR
-    pc: int = 0
-    rs_val: int = 0
-    rt_val: int = 0
-    imm: int = 0
+    instruction: Instruction = field(default_factory=lambda: NOP_INSTR)
+    pc_plus4:    int  = 0
+
+    # Values read from the register file in the ID stage
+    reg_rs:   int = 0   # value of rs (first source register)
+    reg_rt:   int = 0   # value of rt (second source register)
+
+    # Immediate sign-extended to 32 bits
+    imm_ext:  int = 0
+
+    # Control signals — set by decode_control(), carried forward unchanged
+    reg_dst:    bool = False  # True  → write dest is rd (R-type)
+                               # False → write dest is rt (I-type)
+    alu_src:    bool = False  # True  → 2nd ALU input is imm_ext, not reg_rt
+    mem_to_reg: bool = False  # True  → write-back comes from memory (LW)
+    reg_write:  bool = False  # True  → write result to register file
+    mem_read:   bool = False  # True  → read from data memory (LW)
+    mem_write:  bool = False  # True  → write to data memory (SW)
+    branch:     bool = False  # True  → this is BEQ
+    jump:       bool = False  # True  → this is J
+    alu_op:     str  = ""     # which ALU operation to run (e.g. "ADD", "LW")
+
     valid: bool = False
 
+# ── CHANGED: EX_MEM ──────────────────────────────────────────
+# Your version only had alu_result and rt_val.
+# Added the fields EX computes and MEM/WB still need:
+#   write_reg      — which register to write back to (chosen by reg_dst)
+#   branch_target  — PC to jump to if BEQ is taken
+#   zero_flag      — True when rs == rt (drives the BEQ decision)
+#   jump_target    — word address for J instructions
+#   + all control signals still needed by MEM and WB stages
+# Renamed: rt_val -> reg_rt
 @dataclass
 class EX_MEM:
-    instr: Instruction = NOP_INSTR
-    alu_result: int = 0
-    rt_val: int = 0
+    instruction:   Instruction = field(default_factory=lambda: NOP_INSTR)
+
+    alu_result:    int  = 0    # ALU output (result or computed memory address)
+    reg_rt:        int  = 0    # rt value — needed by SW to know what to store
+    write_reg:     int  = 0    # register index that WB will write to
+
+    branch_target: int  = 0    # PC to use if BEQ is taken  (pc_plus4 + imm_ext)
+    zero_flag:     bool = False # True when rs == rt; gates the branch
+    jump_target:   int  = 0    # word-address for J
+
+    # Control signals still needed by MEM and WB
+    mem_to_reg:  bool = False
+    reg_write:   bool = False
+    mem_read:    bool = False
+    mem_write:   bool = False
+    branch:      bool = False
+    jump:        bool = False
+
     valid: bool = False
 
+# ── CHANGED: MEM_WB ──────────────────────────────────────────
+# Your version had a single write_val field.
+# Split into alu_result + mem_data because WB needs BOTH values
+# present so it can choose between them using the mem_to_reg signal.
+# (If you merged them into one field you'd have to make the choice
+# in the MEM stage, which doesn't match how the real pipeline works.)
 @dataclass
 class MEM_WB:
-    instr: Instruction = NOP_INSTR
-    write_val: int = 0
+    instruction: Instruction = field(default_factory=lambda: NOP_INSTR)
+
+    alu_result:  int  = 0   # used when mem_to_reg is False (R-type, ADDI, etc.)
+    mem_data:    int  = 0   # used when mem_to_reg is True  (LW)
+    write_reg:   int  = 0   # destination register index
+
+    # Control signals needed by WB
+    mem_to_reg: bool = False  # selects between mem_data and alu_result
+    reg_write:  bool = False  # whether to actually write
+
     valid: bool = False
 
 
 # ─────────────────────────────────────────────────────────────
-#  CONTROL UNIT  (TODO: Step 3) 
+#  CONTROL UNIT  (Step 3 ✅)
 # ─────────────────────────────────────────────────────────────
 
-# TODO: Define a ControlSignals dataclass and decode_control(instr) function.
-# decode_control should return the correct signals for each opcode:
-#   reg_dst, alu_src, mem_to_reg, reg_write,
-#   mem_read, mem_write, branch, jump, alu_op
-
-# UNFINISHED
-
+# ── CHANGED: ControlSignals ───────────────────────────────────
+# Your version used a plain class without @dataclass, so the fields
+# were class-level annotations with no actual default values — every
+# instance would share the same defaults and assignment wouldn't work
+# correctly. Changed to @dataclass so each instance gets its own copy.
+# Also changed alu_op default from "NOP" to "" (empty string) so
+# callers can check `if cs.alu_op` to detect a no-op cleanly.
+@dataclass
 class ControlSignals:
-    reg_dst: bool = False
-    alu_src: bool = False
+    reg_dst:    bool = False
+    alu_src:    bool = False
     mem_to_reg: bool = False
-    reg_write: bool = False
-    mem_read: bool = False
-    mem_write: bool = False
-    branch: bool = False
-    jump: bool = False
-    alu_op: str = "NOP"
+    reg_write:  bool = False
+    mem_read:   bool = False
+    mem_write:  bool = False
+    branch:     bool = False
+    jump:       bool = False
+    alu_op:     str  = ""    # changed from "NOP" → ""
 
-def decode_control(instr: Instruction):
+
+# ── CHANGED: decode_control ───────────────────────────────────
+# Your version had the function signature but no body (would crash
+# with a SyntaxError). Filled in the full truth table for all opcodes.
+def decode_control(instr: Instruction) -> ControlSignals:
+    """
+    Control unit: maps opcode -> control signals.
+
+    Truth table:
+    ┌────────┬─────────┬─────────┬───────────┬───────────┬──────────┬───────────┬────────┬──────┐
+    │ Opcode │ reg_dst │ alu_src │ mem_to_reg│ reg_write │ mem_read │ mem_write │ branch │ jump │
+    ├────────┼─────────┼─────────┼───────────┼───────────┼──────────┼───────────┼────────┼──────┤
+    │ R-type │    1    │    0    │     0     │     1     │    0     │     0     │   0    │  0   │
+    │ ADDI   │    0    │    1    │     0     │     1     │    0     │     0     │   0    │  0   │
+    │ LW     │    0    │    1    │     1     │     1     │    1     │     0     │   0    │  0   │
+    │ SW     │    —    │    1    │     —     │     0     │    0     │     1     │   0    │  0   │
+    │ BEQ    │    —    │    0    │     —     │     0     │    0     │     0     │   1    │  0   │
+    │ J      │    —    │    —    │     —     │     0     │    0     │     0     │   0    │  1   │
+    │ NOP    │    0    │    0    │     0     │     0     │    0     │     0     │   0    │  0   │
+    └────────┴─────────┴─────────┴───────────┴───────────┴──────────┴───────────┴────────┴──────┘
+    """
+    op = instr.opcode.upper()
+    c  = ControlSignals()  # all signals default False / ""
+
+    if op == 'NOP':
+        pass  # nothing to do
+
+    elif op in R_TYPE:  # ADD, SUB, MUL, AND, OR, SLL, SRL
+        c.reg_dst   = True
+        c.reg_write = True
+        c.alu_op    = op
+
+    elif op == 'ADDI':
+        c.alu_src   = True
+        c.reg_write = True
+        c.alu_op    = 'ADDI'
+
+    elif op == 'LW':
+        c.alu_src    = True
+        c.mem_to_reg = True
+        c.reg_write  = True
+        c.mem_read   = True
+        c.alu_op     = 'LW'
+
+    elif op == 'SW':
+        c.alu_src   = True
+        c.mem_write = True
+        c.alu_op    = 'SW'
+
+    elif op == 'BEQ':
+        c.branch    = True
+        c.alu_op    = 'BEQ'
+
+    elif op == 'J':
+        c.jump      = True
+
+    else:
+        raise ValueError(f"decode_control: unknown opcode '{op}'")
+
+    return c
 
 
 # ─────────────────────────────────────────────────────────────
@@ -427,14 +546,30 @@ def main():
     # sim = MIPSSimulator(instructions, debug=args.debug)
     # sim.run()
 
-    # Temporary: just dump a blank register file and memory
-    print("(Simulator not yet implemented — register/memory output placeholder)")
+    # Step 2 & 3 verification — remove this block once the simulator is wired up
+    print("Step 2 check — latch shapes:")
+    sample = instructions[0]
+    print(f"  IF_ID  valid={IF_ID(instruction=sample, pc_plus4=1, valid=True).valid}")
+    print(f"  ID_EX  valid={ID_EX(instruction=sample, valid=True).valid}")
+    print(f"  EX_MEM valid={EX_MEM(instruction=sample, valid=True).valid}")
+    print(f"  MEM_WB valid={MEM_WB(instruction=sample, valid=True).valid}")
     print()
-    rf = RegisterFile()
-    mem = Memory()
-    print(rf.dump())
-    print()
-    print(mem.dump())
+
+    print("Step 3 check — control signals:")
+    for op, kwargs in [
+        ("ADD",  dict(rd=8,  rs=9, rt=10)),
+        ("ADDI", dict(rt=8,  rs=0, imm=5)),
+        ("LW",   dict(rt=8,  rs=16, imm=0)),
+        ("SW",   dict(rt=8,  rs=16, imm=0)),
+        ("BEQ",  dict(rs=8,  rt=9,  imm=2)),
+        ("J",    dict(target=10)),
+        ("NOP",  dict()),
+    ]:
+        cs = decode_control(Instruction(raw=op, opcode=op, **kwargs))
+        print(f"  {op:<4} | reg_dst={int(cs.reg_dst)} alu_src={int(cs.alu_src)}"
+              f" mem_to_reg={int(cs.mem_to_reg)} reg_write={int(cs.reg_write)}"
+              f" mem_read={int(cs.mem_read)} mem_write={int(cs.mem_write)}"
+              f" branch={int(cs.branch)} jump={int(cs.jump)} alu_op={cs.alu_op!r}")
 
 
 if __name__ == "__main__":
