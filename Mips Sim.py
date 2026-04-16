@@ -302,6 +302,38 @@ def assemble(lines: List[str]) -> List['Instruction']:
 #   - a `valid: bool` flag (False = bubble/NOP)
 #   - any values computed in the previous stage
 #   - control signals relevant to downstream stages
+#
+# For example, IF_ID might hold the fetched instruction and its PC,
+# while ID_EX might hold the decoded instruction, register values, and control signals.
+# This allows multiple instructions to be processed at the same time, each at a different stage.
+
+@dataclass
+class IF_ID:
+    instr: Instruction = NOP_INSTR
+    pc: int = 0
+    valid: bool = False
+
+@dataclass
+class ID_EX:
+    instr: Instruction = NOP_INSTR
+    pc: int = 0
+    rs_val: int = 0
+    rt_val: int = 0
+    imm: int = 0
+    valid: bool = False
+
+@dataclass
+class EX_MEM:
+    instr: Instruction = NOP_INSTR
+    alu_result: int = 0
+    rt_val: int = 0
+    valid: bool = False
+
+@dataclass
+class MEM_WB:
+    instr: Instruction = NOP_INSTR
+    write_val: int = 0
+    valid: bool = False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -313,6 +345,7 @@ def assemble(lines: List[str]) -> List['Instruction']:
 #   reg_dst, alu_src, mem_to_reg, reg_write,
 #   mem_read, mem_write, branch, jump, alu_op
 
+def decode_control(instr: Instruction):
 
 # ─────────────────────────────────────────────────────────────
 #  ALU  (TODO: Step 4)
