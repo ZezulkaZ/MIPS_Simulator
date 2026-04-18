@@ -609,14 +609,166 @@ def alu_execute(op: str, a: int, b: int) -> int:
 # ─────────────────────────────────────────────────────────────
 
 # TODO: Implement MIPSSimulator class with:
-#   - __init__: initialize regfile, memory, pc, cycle counter, pipeline latches
-#   - stage_IF, stage_ID, stage_EX, stage_MEM, stage_WB methods
-#   - update_pc: handle branch/jump PC override
 #   - run: main cycle loop
 #   - print_debug_state: per-cycle output for -d flag
 #   - print_final_state: final register + memory dump
 
+    # ─────────────────────────────────────────────────────────────
+    #  STEP 5: PIPELINE STAGE FUNCTIONS
+    # ─────────────────────────────────────────────────────────────
 
+class MIPSSimulator:
+    def __init__(self, program):
+        self.program = program           
+        self.pc = 0                      # WORD index
+        self.cycle = 0                   
+        self.registers = RegisterFile() 
+        self.memory = Memory()           
+        
+        self.if_id = IF_ID(valid=False)
+        self.id_ex = ID_EX(valid=False)
+        self.ex_mem = EX_MEM(valid=False)
+        self.mem_wb = MEM_WB(valid=False)
+
+    # ───────── IF ─────────
+    def stage_IF(self):
+        if self.pc < len(self.program):
+            instr = self.program[self.pc]
+            return IF_ID(
+                instruction=instr,
+                pc_plus4=self.pc + 1,
+                valid=True
+            )
+        return IF_ID(valid=False)
+
+    # ───────── ID ─────────
+    def stage_ID(self, if_id_latch):
+        if not if_id_latch.valid:
+            return ID_EX(valid=False)
+
+        instr = if_id_latch.instruction
+
+        reg_rs_val = self.registers.read(instr.rs)
+        reg_rt_val = self.registers.read(instr.rt)
+        imm_ext = sign_extend_16(instr.imm)
+        signals = decode_control(instr)
+
+        return ID_EX(
+            instruction=instr,
+            pc_plus4=if_id_latch.pc_plus4,
+
+            reg_rs=reg_rs_val,
+            reg_rt=reg_rt_val,
+            imm_ext=imm_ext,
+
+            reg_dst=signals.reg_dst,
+            alu_src=signals.alu_src,
+            mem_to_reg=signals.mem_to_reg,
+            reg_write=signals.reg_write,
+            mem_read=signals.mem_read,
+            mem_write=signals.mem_write,
+            branch=signals.branch,
+            jump=signals.jump,
+            alu_op=signals.alu_op,
+
+            valid=True
+        )
+
+    # ───────── EX ─────────
+    def stage_EX(self, id_ex_latch):
+        if not id_ex_latch.valid:
+            return EX_MEM(valid=False)
+
+        instr = id_ex_latch.instruction
+
+        # FIX: use id_ex_latch instead of undefined signals
+        val_a = id_ex_latch.reg_rs
+        val_b = id_ex_latch.imm_ext if id_ex_latch.alu_src else id_ex_latch.reg_rt
+
+        alu_result = alu_execute(id_ex_latch.alu_op, val_a, val_b)
+
+        write_reg = instr.rd if id_ex_latch.reg_dst else instr.rt
+
+        # FIX: no <<2 (word addressing)
+        branch_target = id_ex_latch.pc_plus4 + id_ex_latch.imm_ext
+
+        zero_flag = (alu_result == 0)
+
+        # FIX: jump target already resolved
+        jump_target = instr.target
+
+        return EX_MEM(
+            instruction=instr,
+            alu_result=alu_result,
+            reg_rt=id_ex_latch.reg_rt,
+            write_reg=write_reg,
+
+            branch_target=branch_target,
+            zero_flag=zero_flag,
+            jump_target=jump_target,
+
+            mem_to_reg=id_ex_latch.mem_to_reg,
+            reg_write=id_ex_latch.reg_write,
+            mem_read=id_ex_latch.mem_read,
+            mem_write=id_ex_latch.mem_write,
+            branch=id_ex_latch.branch,
+            jump=id_ex_latch.jump,
+
+            valid=True
+        )
+
+    # ───────── MEM ─────────
+    def stage_MEM(self, ex_mem_latch):
+        if not ex_mem_latch.valid:
+            return MEM_WB(valid=False)
+
+        alu_result = ex_mem_latch.alu_result
+        mem_data = 0
+
+        if ex_mem_latch.mem_read:
+            mem_data = self.memory.load_word(alu_result)
+
+        if ex_mem_latch.mem_write:
+            self.memory.store_word(alu_result, ex_mem_latch.reg_rt)
+
+        return MEM_WB(
+            instruction=ex_mem_latch.instruction,
+            alu_result=alu_result,
+            mem_data=mem_data,
+            write_reg=ex_mem_latch.write_reg,
+            mem_to_reg=ex_mem_latch.mem_to_reg,
+            reg_write=ex_mem_latch.reg_write,
+            valid=True
+        )
+
+    # ───────── WB ─────────
+    def stage_WB(self, mem_wb_latch):
+        if not mem_wb_latch.valid:
+            return
+
+        value_to_write = (
+            mem_wb_latch.mem_data
+            if mem_wb_latch.mem_to_reg
+            else mem_wb_latch.alu_result
+        )
+
+        if mem_wb_latch.reg_write:
+            self.registers.write(mem_wb_latch.write_reg, value_to_write)
+
+    # ───────── PC UPDATE ─────────
+    def update_pc(self, ex_mem_latch):
+        if not ex_mem_latch.valid:
+            self.pc += 1
+            return
+
+        if ex_mem_latch.jump:
+            self.pc = ex_mem_latch.jump_target
+
+        elif ex_mem_latch.branch and ex_mem_latch.zero_flag:
+            self.pc = ex_mem_latch.branch_target
+
+        else:
+            self.pc += 1
 # ─────────────────────────────────────────────────────────────
 #  ENTRY POINT  (wire up when simulator class is ready)
 # ─────────────────────────────────────────────────────────────
@@ -687,5 +839,36 @@ def main():
               f" branch={int(cs.branch)} jump={int(cs.jump)} alu_op={cs.alu_op!r}")
 
 
+    #  Step 5 Verification — Pipeline Logic Test
+   
+    print("Step 5 check — Pipeline Stage Transitions:")
+    
+    test_instr = Instruction(raw="ADD", opcode="ADD", rs=8, rt=9, rd=10)
+    sim = MIPSSimulator([test_instr])
+    
+    sim.registers.write(8, 100) # $t0 = 100
+    sim.registers.write(9, 50)  # $t1 = 50
+
+    latch_if_id = sim.stage_IF()
+    print(f"  [IF] Fetched: {latch_if_id.instruction.opcode}, Next PC: {latch_if_id.pc_plus4}")
+
+    latch_id_ex = sim.stage_ID(latch_if_id)
+    print(f"  [ID] Read Regs: rs={latch_id_ex.reg_rs}, rt={latch_id_ex.reg_rt}")
+
+    latch_ex_mem = sim.stage_EX(latch_id_ex)
+    print(f"  [EX] ALU Result (100+50): {latch_ex_mem.alu_result}, Dest Reg: {latch_ex_mem.write_reg}")
+
+    latch_mem_wb = sim.stage_MEM(latch_ex_mem)
+    print(f"  [MEM] Passed Result: {latch_mem_wb.alu_result}")
+
+    sim.stage_WB(latch_mem_wb)
+    final_val = sim.registers.read(10)
+    print(f"  [WB] Final Register $t2: {final_val}")
+
+    if final_val == 150:
+        print("\n  STEP 5 LOGIC VERIFIED: Data flowed correctly from IF to WB!")
+    else:
+        print("\n  STEP 5 LOGIC ERROR: Final value did not match expected result.")
+        
 if __name__ == "__main__":
     main()
