@@ -293,7 +293,7 @@ def assemble(lines: List[str]) -> List['Instruction']:
 
 
 # ─────────────────────────────────────────────────────────────
-#  PIPELINE STATE REGISTERS  (Step 2 ✅)
+#  PIPELINE STATE REGISTERS  (Step 2 )
 # ─────────────────────────────────────────────────────────────
 
 # ── CHANGED: IF_ID ───────────────────────────────────────────
@@ -396,7 +396,7 @@ class MEM_WB:
 
 
 # ─────────────────────────────────────────────────────────────
-#  CONTROL UNIT  (Step 3 ✅)
+#  CONTROL UNIT  (Step 3 )
 # ─────────────────────────────────────────────────────────────
 
 # ── CHANGED: ControlSignals ───────────────────────────────────
@@ -488,6 +488,121 @@ def decode_control(instr: Instruction) -> ControlSignals:
 # Should handle: ADD, ADDI, SUB, MUL, AND, OR, SLL, SRL, LW (addr), SW (addr), BEQ (subtract)
 # Remember: sign-extend inputs, mask result to 32 bits
 
+def sign_extend_16(val: int) -> int:
+    """
+    Sign-extend a 16-bit immediate to a Python int.
+ 
+    MIPS immediates are stored as 16-bit two's complement.
+    When fed to the ALU, negative offsets (e.g. -4 stored as 0xFFFC)
+    must be treated as negative Python integers, not large positives.
+ 
+    Example:
+        0x0005  ->  5      (positive, unchanged)
+        0xFFF8  -> -8      (bit 15 set, subtract 2^16)
+    """
+    val = val & 0xFFFF       # keep only the low 16 bits
+    if val & 0x8000:         # bit 15 is the sign bit
+        val -= 0x10000       # wrap into negative range
+    return val
+ 
+ 
+def to_signed32(val: int) -> int:
+    """
+    Interpret a value as a 32-bit signed integer.
+ 
+    Register values are masked to 32 bits, but Python ints are
+    unbounded. This converts 0x80000000–0xFFFFFFFF into their negative
+    equivalents so arithmetic like SUB and BEQ works across the
+    positive/negative boundary correctly.
+ 
+    Example:
+        0x00000007  ->   7
+        0xFFFFFFF9  ->  -7
+    """
+    val = val & 0xFFFFFFFF
+    if val & 0x80000000:
+        val -= 0x100000000
+    return val
+ 
+ 
+def alu_execute(op: str, a: int, b: int) -> int:
+    """
+    Execute one ALU operation and return a 32-bit unsigned result.
+ 
+    Parameters
+    ----------
+    op : str
+        The operation — matches the alu_op set by decode_control.
+        e.g. "ADD", "SUB", "LW", "BEQ".
+    a : int
+        First operand. For most instructions this is reg_rs.
+        For SLL/SRL this is reg_rt (the value being shifted).
+    b : int
+        Second operand. Either reg_rt or imm_ext, chosen by the
+        alu_src signal in stage_EX before calling this function.
+        For SLL/SRL this is the shift amount (shamt from the imm field).
+ 
+    Returns
+    -------
+    int
+        Result masked to 32 bits (0x00000000–0xFFFFFFFF).
+        For BEQ the caller checks result == 0 for the zero flag;
+        this function just does the subtraction.
+ 
+    How each opcode maps to the pipeline
+    ──────────────────────────────────────
+    ADD / SUB / MUL / AND / OR  — R-type arithmetic and logic
+    ADDI                         — I-type add with sign-extended immediate
+    SLL / SRL                    — shifts; a = reg_rt, b = shamt
+    LW  / SW                     — address calc: base + offset
+    BEQ                          — subtraction; zero flag set by caller
+    """
+    # Convert both operands to signed 32-bit before arithmetic.
+    # Bitwise and shift ops work on unsigned too, but this keeps
+    # everything consistent and handles negative register values.
+    a = to_signed32(a)
+    b = to_signed32(b)
+ 
+    if op in ('ADD', 'ADDI'):
+        result = a + b
+ 
+    elif op == 'SUB':
+        result = a - b
+ 
+    elif op == 'MUL':
+        result = a * b
+ 
+    elif op == 'AND':
+        result = a & b
+ 
+    elif op == 'OR':
+        result = a | b
+ 
+    elif op == 'SLL':
+        # a = value to shift (reg_rt), b = shift amount (shamt)
+        # Mask shift amount to 5 bits (0–31) per MIPS spec.
+        result = a << (b & 0x1F)
+ 
+    elif op == 'SRL':
+        # Logical right shift — use unsigned a so no sign bits
+        # are dragged in from the left.
+        result = (a & 0xFFFFFFFF) >> (b & 0x1F)
+ 
+    elif op in ('LW', 'SW'):
+        # Both load and store compute the same address: base + offset
+        result = a + b
+ 
+    elif op == 'BEQ':
+        # rs - rt; caller checks result == 0 to decide branch
+        result = a - b
+ 
+    else:
+        # NOP, J, or unknown — ALU unused, return 0
+        result = 0
+ 
+    # Mask to 32 bits — silently wraps overflow, matching real hardware.
+    # e.g. 0xFFFFFFFF + 1 -> 0x00000000
+    return result & 0xFFFFFFFF
 
 # ─────────────────────────────────────────────────────────────
 #  PIPELINE SIMULATOR  (TODO: Steps 5-7)
