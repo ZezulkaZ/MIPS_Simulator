@@ -3,8 +3,8 @@
 MIPS 5-Stage Pipeline Simulator
 CS3339, Spring 2026
 
-STEP 1 (starter): Instruction parsing + register file + memory
-TODO (your steps):
+STEP 1 : Instruction parsing + register file + memory
+TODO :
   - Step 2: Add pipeline state registers (IF/ID, ID/EX, EX/MEM, MEM/WB)
   - Step 3: Add control unit (decode_control)
   - Step 4: Add ALU (alu_execute)
@@ -296,27 +296,13 @@ def assemble(lines: List[str]) -> List['Instruction']:
 #  PIPELINE STATE REGISTERS  (Step 2 )
 # ─────────────────────────────────────────────────────────────
 
-# ── CHANGED: IF_ID ───────────────────────────────────────────
-# Your version used `instr` and `pc`.
-# Renamed to match the field names the later stages expect:
-#   instr -> instruction   (clearer, matches ID_EX/EX_MEM/MEM_WB)
-#   pc    -> pc_plus4      (more precise: this is PC+1 in word units,
-#                           i.e. the address of the NEXT instruction,
-#                           used by BEQ to compute the branch target)
 @dataclass
 class IF_ID:
     instruction: Instruction = field(default_factory=lambda: NOP_INSTR)
     pc_plus4:    int  = 0     # word index of the instruction that follows this one
     valid:       bool = False  # False → bubble, downstream stages ignore this slot
 
-# ── CHANGED: ID_EX ───────────────────────────────────────────
-# Your version had rs_val, rt_val, imm but was missing all control signals.
-# Control signals must travel with the instruction through the pipeline
-# so each downstream stage knows what to do without re-decoding.
-# Added: reg_dst, alu_src, mem_to_reg, reg_write, mem_read,
-#        mem_write, branch, jump, alu_op
-# Renamed: rs_val -> reg_rs, rt_val -> reg_rt, imm -> imm_ext
-#   (imm_ext makes it clear the value has been sign-extended to 32 bits)
+
 @dataclass
 class ID_EX:
     instruction: Instruction = field(default_factory=lambda: NOP_INSTR)
@@ -343,15 +329,6 @@ class ID_EX:
 
     valid: bool = False
 
-# ── CHANGED: EX_MEM ──────────────────────────────────────────
-# Your version only had alu_result and rt_val.
-# Added the fields EX computes and MEM/WB still need:
-#   write_reg      — which register to write back to (chosen by reg_dst)
-#   branch_target  — PC to jump to if BEQ is taken
-#   zero_flag      — True when rs == rt (drives the BEQ decision)
-#   jump_target    — word address for J instructions
-#   + all control signals still needed by MEM and WB stages
-# Renamed: rt_val -> reg_rt
 @dataclass
 class EX_MEM:
     instruction:   Instruction = field(default_factory=lambda: NOP_INSTR)
@@ -374,12 +351,7 @@ class EX_MEM:
 
     valid: bool = False
 
-# ── CHANGED: MEM_WB ──────────────────────────────────────────
-# Your version had a single write_val field.
-# Split into alu_result + mem_data because WB needs BOTH values
-# present so it can choose between them using the mem_to_reg signal.
-# (If you merged them into one field you'd have to make the choice
-# in the MEM stage, which doesn't match how the real pipeline works.)
+
 @dataclass
 class MEM_WB:
     instruction: Instruction = field(default_factory=lambda: NOP_INSTR)
@@ -399,13 +371,6 @@ class MEM_WB:
 #  CONTROL UNIT  (Step 3 )
 # ─────────────────────────────────────────────────────────────
 
-# ── CHANGED: ControlSignals ───────────────────────────────────
-# Your version used a plain class without @dataclass, so the fields
-# were class-level annotations with no actual default values — every
-# instance would share the same defaults and assignment wouldn't work
-# correctly. Changed to @dataclass so each instance gets its own copy.
-# Also changed alu_op default from "NOP" to "" (empty string) so
-# callers can check `if cs.alu_op` to detect a no-op cleanly.
 @dataclass
 class ControlSignals:
     reg_dst:    bool = False
@@ -605,28 +570,26 @@ def alu_execute(op: str, a: int, b: int) -> int:
     return result & 0xFFFFFFFF
 
 # ─────────────────────────────────────────────────────────────
-#  PIPELINE SIMULATOR  (TODO: Steps 5-7)
+#  PIPELINE SIMULATOR  (Steps 5 + 6 + 7 )
 # ─────────────────────────────────────────────────────────────
 
-# TODO: Implement MIPSSimulator class with:
-#   - run: main cycle loop
-#   - print_debug_state: per-cycle output for -d flag
-#   - print_final_state: final register + memory dump
-
     # ─────────────────────────────────────────────────────────────
-    #  STEP 5: PIPELINE STAGE FUNCTIONS
+    #  STEP 5: PIPELINE STAGE FUNCTIONS  
     # ─────────────────────────────────────────────────────────────
 
 class MIPSSimulator:
-    def __init__(self, program):
-        self.program = program           
-        self.pc = 0                      # WORD index
-        self.cycle = 0                   
-        self.registers = RegisterFile() 
-        self.memory = Memory()           
-        
-        self.if_id = IF_ID(valid=False)
-        self.id_ex = ID_EX(valid=False)
+    # ── CHANGED: added debug flag and instructions_committed counter
+    def __init__(self, program, debug=False):
+        self.program = program
+        self.pc = 0                       # WORD index
+        self.cycle = 0
+        self.debug = debug                # -d flag enables per-cycle output
+        self.instructions_committed = 0   # incremented each time WB writes
+        self.registers = RegisterFile()
+        self.memory = Memory()
+
+        self.if_id  = IF_ID(valid=False)
+        self.id_ex  = ID_EX(valid=False)
         self.ex_mem = EX_MEM(valid=False)
         self.mem_wb = MEM_WB(valid=False)
 
@@ -680,21 +643,34 @@ class MIPSSimulator:
             return EX_MEM(valid=False)
 
         instr = id_ex_latch.instruction
+        op    = instr.opcode.upper()
 
-        # FIX: use id_ex_latch instead of undefined signals
-        val_a = id_ex_latch.reg_rs
-        val_b = id_ex_latch.imm_ext if id_ex_latch.alu_src else id_ex_latch.reg_rt
+        # ── CHANGED: SLL/SRL use (reg_rt, shamt) not (reg_rs, reg_rt/imm)
+        # All other instructions use reg_rs as input-a, and either
+        # imm_ext (alu_src=True) or reg_rt (alu_src=False) as input-b.
+        if op in ('SLL', 'SRL'):
+            val_a = id_ex_latch.reg_rt   # value to shift
+            val_b = instr.imm            # shamt (NOT sign-extended)
+        elif id_ex_latch.alu_src:
+            val_a = id_ex_latch.reg_rs
+            val_b = id_ex_latch.imm_ext
+        else:
+            val_a = id_ex_latch.reg_rs
+            val_b = id_ex_latch.reg_rt
 
         alu_result = alu_execute(id_ex_latch.alu_op, val_a, val_b)
 
         write_reg = instr.rd if id_ex_latch.reg_dst else instr.rt
 
-        # FIX: no <<2 (word addressing)
         branch_target = id_ex_latch.pc_plus4 + id_ex_latch.imm_ext
 
-        zero_flag = (alu_result == 0)
+        # ── CHANGED: zero_flag compares the register values directly,
+        # not the ALU result. BEQ asks 'are rs and rt equal?' — the ALU
+        # does rs-rt and the hardware checks if the result is zero, but
+        # here we compare directly so other instructions (like ADD whose
+        # result happens to be 0) don't accidentally trigger a branch.
+        zero_flag = (to_signed32(id_ex_latch.reg_rs) == to_signed32(id_ex_latch.reg_rt))
 
-        # FIX: jump target already resolved
         jump_target = instr.target
 
         return EX_MEM(
@@ -754,6 +730,7 @@ class MIPSSimulator:
 
         if mem_wb_latch.reg_write:
             self.registers.write(mem_wb_latch.write_reg, value_to_write)
+            self.instructions_committed += 1
 
     # ───────── PC UPDATE ─────────
     def update_pc(self, ex_mem_latch):
@@ -769,6 +746,86 @@ class MIPSSimulator:
 
         else:
             self.pc += 1
+
+    # ─────────────────────────────────────────────────────────
+    #  STEP 6: Main simulation loop 
+    # ─────────────────────────────────────────────────────────
+    #
+    # Cycle order each tick:
+    #   1. WB        — commit result to register file
+    #   2. MEM       — compute next MEM/WB from EX/MEM
+    #   3. EX        — compute next EX/MEM from ID/EX
+    #   4. ID        — compute next ID/EX from IF/ID
+    #   5. update_pc — override PC for branch/jump
+    #   6. IF        — fetch using updated PC
+    #   7. Latch     — all four new latches take effect
+    #
+    # Stops when all latches are empty AND PC is past the program.
+
+    def run(self):
+        while True:
+            self.cycle += 1
+
+            # Stages execute in order — WB first so results are
+            # committed before this cycle's IF fetches
+            self.stage_WB(self.mem_wb)
+
+            new_mem_wb = self.stage_MEM(self.ex_mem)
+            new_ex_mem = self.stage_EX(self.id_ex)
+            new_id_ex  = self.stage_ID(self.if_id)
+
+            # ── CHANGED: IF fetches BEFORE update_pc runs.
+            # The team's update_pc always increments self.pc by 1
+            # (normal case) or overrides it (branch/jump). Since
+            # stage_IF uses self.pc to fetch and then sets
+            # pc_plus4 = self.pc + 1, it must see the pre-update
+            # value. update_pc then advances or overrides for the
+            # NEXT cycle's fetch.
+            new_if_id  = self.stage_IF()
+            self.update_pc(new_ex_mem)
+
+            # Latch all simultaneously
+            self.if_id  = new_if_id
+            self.id_ex  = new_id_ex
+            self.ex_mem = new_ex_mem
+            self.mem_wb = new_mem_wb
+
+            if self.debug:
+                self.print_debug_state()
+
+            # Stop once all stages are drained and PC is past end
+            pipeline_empty = not any([
+                self.if_id.valid,
+                self.id_ex.valid,
+                self.ex_mem.valid,
+                self.mem_wb.valid,
+            ])
+            if pipeline_empty and self.pc >= len(self.program):
+                break
+
+            # Safety valve — catches runaway programs
+            if self.cycle > len(self.program) * 20 + 50:
+                print('[WARNING] Cycle limit reached.')
+                break
+
+        self.print_final_state()
+
+    # ─────────────────────────────────────────────────────────
+    #  STEP 7: Debug and final output 
+    # ─────────────────────────────────────────────────────────
+
+    def print_final_state(self):
+        print("Final Register File:")
+        print(self.registers.dump())
+        print()
+        print("Final Memory:")
+        print(self.memory.dump())
+
+    def print_debug_state(self):
+        print(f"Cycle {self.cycle}: PC={self.pc}")
+        # TODO: implement debug output as per README
+
+
 # ─────────────────────────────────────────────────────────────
 #  ENTRY POINT  (wire up when simulator class is ready)
 # ─────────────────────────────────────────────────────────────
@@ -809,66 +866,9 @@ def main():
         print(f"  [{i:3d}]  {instr.raw:<32s}  =>  {instr.binary_repr()}")
     print()
 
-    # TODO: uncomment once MIPSSimulator is implemented
-    # sim = MIPSSimulator(instructions, debug=args.debug)
-    # sim.run()
-
-    # Step 2 & 3 verification — remove this block once the simulator is wired up
-    print("Step 2 check — latch shapes:")
-    sample = instructions[0]
-    print(f"  IF_ID  valid={IF_ID(instruction=sample, pc_plus4=1, valid=True).valid}")
-    print(f"  ID_EX  valid={ID_EX(instruction=sample, valid=True).valid}")
-    print(f"  EX_MEM valid={EX_MEM(instruction=sample, valid=True).valid}")
-    print(f"  MEM_WB valid={MEM_WB(instruction=sample, valid=True).valid}")
-    print()
-
-    print("Step 3 check — control signals:")
-    for op, kwargs in [
-        ("ADD",  dict(rd=8,  rs=9, rt=10)),
-        ("ADDI", dict(rt=8,  rs=0, imm=5)),
-        ("LW",   dict(rt=8,  rs=16, imm=0)),
-        ("SW",   dict(rt=8,  rs=16, imm=0)),
-        ("BEQ",  dict(rs=8,  rt=9,  imm=2)),
-        ("J",    dict(target=10)),
-        ("NOP",  dict()),
-    ]:
-        cs = decode_control(Instruction(raw=op, opcode=op, **kwargs))
-        print(f"  {op:<4} | reg_dst={int(cs.reg_dst)} alu_src={int(cs.alu_src)}"
-              f" mem_to_reg={int(cs.mem_to_reg)} reg_write={int(cs.reg_write)}"
-              f" mem_read={int(cs.mem_read)} mem_write={int(cs.mem_write)}"
-              f" branch={int(cs.branch)} jump={int(cs.jump)} alu_op={cs.alu_op!r}")
-
-
-    #  Step 5 Verification — Pipeline Logic Test
-   
-    print("Step 5 check — Pipeline Stage Transitions:")
-    
-    test_instr = Instruction(raw="ADD", opcode="ADD", rs=8, rt=9, rd=10)
-    sim = MIPSSimulator([test_instr])
-    
-    sim.registers.write(8, 100) # $t0 = 100
-    sim.registers.write(9, 50)  # $t1 = 50
-
-    latch_if_id = sim.stage_IF()
-    print(f"  [IF] Fetched: {latch_if_id.instruction.opcode}, Next PC: {latch_if_id.pc_plus4}")
-
-    latch_id_ex = sim.stage_ID(latch_if_id)
-    print(f"  [ID] Read Regs: rs={latch_id_ex.reg_rs}, rt={latch_id_ex.reg_rt}")
-
-    latch_ex_mem = sim.stage_EX(latch_id_ex)
-    print(f"  [EX] ALU Result (100+50): {latch_ex_mem.alu_result}, Dest Reg: {latch_ex_mem.write_reg}")
-
-    latch_mem_wb = sim.stage_MEM(latch_ex_mem)
-    print(f"  [MEM] Passed Result: {latch_mem_wb.alu_result}")
-
-    sim.stage_WB(latch_mem_wb)
-    final_val = sim.registers.read(10)
-    print(f"  [WB] Final Register $t2: {final_val}")
-
-    if final_val == 150:
-        print("\n  STEP 5 LOGIC VERIFIED: Data flowed correctly from IF to WB!")
-    else:
-        print("\n  STEP 5 LOGIC ERROR: Final value did not match expected result.")
+    # ── CHANGED: removed old step verification blocks, wired real simulator
+    sim = MIPSSimulator(instructions, debug=args.debug)
+    sim.run()
         
 if __name__ == "__main__":
     main()
